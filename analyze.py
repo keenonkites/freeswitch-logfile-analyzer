@@ -91,6 +91,34 @@ class Events:
       "call_summary": self.call_summary.to_dict(),
     }
 
+class Line:
+  """ Provides a 'Line' object to query various fields from logline. """
+
+  def __init__(self, line:str) -> None:
+    self.logline = line
+    self.event_id = str(UUID(line.split()[0]))
+    self.date = line.split()[1]
+    self.time = line.split()[2]
+    timestamp = f"{self.date} {self.time}"
+    self.timestamp = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S.%f').timestamp()
+
+  def extract(self, pattern:str, ignore_case:bool = True) -> str:
+    """ Extracts and arbitrary value from logline using supplied pattern and returns it as string. """
+    re.compile(pattern)
+    try:
+      if ignore_case: return re.search(pattern, line, re.IGNORECASE).group(1)
+      else: return re.search(pattern, line).group(1)
+    except:
+      return None
+
+  def match(self, pattern:str, ignore_case:bool = True) -> bool:
+    """ Returns True if pattern is found in log line """
+    re.compile(pattern)
+    if ignore_case:
+      return bool(re.search(pattern, line, re.IGNORECASE))
+    else:
+      return bool(re.search(pattern, line))
+
 def init_db(db_file:str='events.db') -> sqlite3.Cursor:
   import contextlib
 
@@ -139,83 +167,52 @@ def store_event(event:dict, db_cursor:sqlite3.Cursor) -> None:
 events = Events()
 
 with open(sys.argv[1], encoding='latin-1') as f:
-  db = init_db()
-
   for line in f:
-    event = None
-    event_id = None
-
     try:
-      event_id = str(UUID(line.split()[0]))
-    except ValueError:
+      log = Line(line)
+    except:
       continue
 
-    try:
-      date = line.split()[1]
-      time = line.split()[2]
-      timestamp = f"{date} {time}"
-    except IndexError:
-      continue
+    if log.event_id not in events.events:
+      event = Event(event_id=log.event_id, start=log.timestamp)
+      events.events[log.event_id] = event
 
-    try:
-      timestamp = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S.%f').timestamp()
-    except ValueError:
-      continue
+    event = events.events[log.event_id]
 
-    if event_id not in events.events:
-      event = Event(event_id=event_id, start=timestamp)
-      events.events[event_id] = event
-      events.event_summary.number_of_events += 1
+    event.cpu_load = 100 - float(log.extract(r' ([0-9.]+?)\% '))
+    event.calling_party_number = log.extract(r'sofia/external/(.+?) ')
+    event.inbound_client_ip = log.extract(r'receiving invite from (.+?):')
+    if log.match(r'New Channel'): event.event_type = 'call'
+    if log.match(r'sending invite call-id'): event.call_direction = 'outbound'
+    if log.match(r'receiving invite'): event.call_direction = 'inbound'
+    if log.match(r'Callstate Change'): event.callstate_changes.append(log.extract(r'Callstate Change (.+?)$'))
+    if log.match(r'state change') and log.match(r' -> '): event.state_changes.append(log.extract(r'state change (.+?)$'))
 
-    event = events.events[event_id]
-    event.cpu_load = 100 - float(line.split()[3].rstrip('%'))
-
-    if 'New Channel' in line:
-      events.call_summary.number_of_calls += 1
-      event.event_type = 'call'
-      try:
-        event.calling_party_number = re.search('sofia/external/(.+?) ', line).group(1)
-      except AttributeError:
-        pass
-
-    event.end = timestamp
+    event.end = log.timestamp
     event.duration = event.end - event.start
-    events.event_summary.average_event_duration = (events.event_summary.average_event_duration + event.duration) / 2
 
-    if 'sending invite call-id' in line:
-      event.call_direction = 'outbound'
-      events.call_summary.number_of_outbound_calls = events.call_summary.number_of_outbound_calls + 1
-
-    if 'receiving invite' in line:
-      event.call_direction = 'inbound'
-      events.call_summary.number_of_inbound_calls = events.call_summary.number_of_inbound_calls + 1
-
-    try:
-      event.inbound_client_ip = re.search('receiving invite from (.+?):', line).group(1)
-    except AttributeError:
-      pass
-
-    if 'Callstate Change' in line:
-      event.callstate_changes.append(re.search(r'Callstate Change (.+?)$', line).group(1))
-
-    if 'state change' in line.lower() and ' -> ' in line:
-      event.state_changes.append(re.search(r'state change (.+?)$', line, re.IGNORECASE).group(1))
-
-    if events.event_summary.logstart is None:
-      events.event_summary.logstart = timestamp
-
-    events.event_summary.logend = timestamp
+    if not events.event_summary.logstart: events.event_summary.logstart = log.timestamp
+    events.event_summary.logend = log.timestamp
     events.event_summary.logperiod = events.event_summary.logend - events.event_summary.logstart
 
-
+  total_event_seconds = 0
   total_call_seconds = 0
   cpu_sum = 0
+  db = init_db()
   for k,v in events.events.items():
+    events.event_summary.number_of_events = events.event_summary.number_of_events + 1
+    total_event_seconds = total_event_seconds + v.duration
+    if v.event_type == 'call':
+      events.call_summary.number_of_calls = events.call_summary.number_of_calls + 1
+      total_call_seconds = total_call_seconds + v.duration
+    if v.call_direction == 'outbound': events.call_summary.number_of_outbound_calls = events.call_summary.number_of_outbound_calls + 1
+    if v.call_direction == 'inbound': events.call_summary.number_of_inbound_calls = events.call_summary.number_of_inbound_calls + 1
     store_event(v.to_dict(), db)
     cpu_sum = cpu_sum + v.cpu_load
     if v.event_type == 'call':
       total_call_seconds = total_call_seconds + v.duration
 
+  events.event_summary.average_event_duration = total_event_seconds / events.event_summary.number_of_events
   events.event_summary.average_cpu_load = cpu_sum / events.event_summary.number_of_events
 
   acd = total_call_seconds / events.call_summary.number_of_calls
