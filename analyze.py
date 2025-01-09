@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+import argparse
+from argparse import RawTextHelpFormatter
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
@@ -12,6 +14,8 @@ from uuid import UUID
 
 from dataclasses import dataclass, field
 from typing import Dict, Optional
+
+PROGRAMNAME = os.path.splitext(os.path.basename(__file__))[0]
 
 @dataclass
 class Event:
@@ -163,10 +167,35 @@ def store_event(event:dict, db_cursor:sqlite3.Cursor) -> None:
     sql = f'INSERT INTO state_changes (event_id, state_before, state_after) VALUES ("%s", "%s", "%s")' % (event['event_id'], state_before, state_after)
     db_cursor.execute(sql)
 
+epilog = f"""
+Examples:
+  {PROGRAMNAME} freeswitch.log
+  {PROGRAMNAME} --output summary freeswitch.log
+  {PROGRAMNAME} --encoding latin-1 freeswitch.log
+  {PROGRAMNAME} --database log-$(date +'%Y-%m-%d-%H:%M:%S').db --encoding latin-1 freeswitch.log
+"""
+
+cli = argparse.ArgumentParser(
+  prog = PROGRAMNAME,
+  formatter_class=RawTextHelpFormatter,
+  description = "Freeswitch logfile analyzer",
+  epilog = epilog,
+)
+
+h = 'Path to Freeswitch logfile to analyze'
+cli.add_argument('logfile', help=h)
+h = 'If set, results will be stored into an SQLite3 database\nunder the given filename'
+cli.add_argument('-d', '--database', help=h)
+h = 'Encoding of the log file'
+cli.add_argument('-e', '--encoding', default='ascii', help=h)
+h = 'Print selected results to STDOUT'
+cli.add_argument('-o', '--output', choices=['all','events','summary'], default='all', help=h)
+args = cli.parse_args()
+
 # Initialisierung der Events
 events = Events()
 
-with open(sys.argv[1], encoding='latin-1') as f:
+with open(args.logfile, encoding=args.encoding) as f:
   for line in f:
     try:
       log = Line(line)
@@ -198,7 +227,7 @@ with open(sys.argv[1], encoding='latin-1') as f:
   total_event_seconds = 0
   total_call_seconds = 0
   cpu_sum = 0
-  db = init_db()
+  if args.database: db = init_db(args.database)
   for k,v in events.events.items():
     events.event_summary.number_of_events = events.event_summary.number_of_events + 1
     total_event_seconds = total_event_seconds + v.duration
@@ -207,7 +236,7 @@ with open(sys.argv[1], encoding='latin-1') as f:
       total_call_seconds = total_call_seconds + v.duration
     if v.call_direction == 'outbound': events.call_summary.number_of_outbound_calls = events.call_summary.number_of_outbound_calls + 1
     if v.call_direction == 'inbound': events.call_summary.number_of_inbound_calls = events.call_summary.number_of_inbound_calls + 1
-    store_event(v.to_dict(), db)
+    if args.database: store_event(v.to_dict(), db)
     cpu_sum = cpu_sum + v.cpu_load
     if v.event_type == 'call':
       total_call_seconds = total_call_seconds + v.duration
@@ -219,4 +248,11 @@ with open(sys.argv[1], encoding='latin-1') as f:
   events.call_summary.average_call_duration = acd
   events.call_summary.calls_per_second = (events.call_summary.number_of_calls * acd) / events.event_summary.logperiod
 
-  print(json.dumps(events.to_dict(), default=str, indent=2))
+  if args.output == 'events':
+    print(json.dumps(events.events.to_dict(), default=str, indent=2))
+  elif args.output == 'summary':
+    print(json.dumps(events.event_summary.to_dict()))
+    print(json.dumps(events.call_summary.to_dict()))
+  else:
+    print(json.dumps(events.to_dict(), default=str, indent=2))
+
