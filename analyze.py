@@ -12,9 +12,6 @@ import sqlite3
 import sys
 from uuid import UUID
 
-from dataclasses import dataclass, field
-from typing import Dict, Optional
-
 PROGRAMNAME = os.path.splitext(os.path.basename(__file__))[0]
 
 @dataclass
