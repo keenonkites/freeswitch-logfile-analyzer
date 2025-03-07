@@ -209,7 +209,7 @@ with open(args.logfile, encoding=args.encoding) as f:
     event = events.events[log.event_id]
 
     event.cpu_load = 100 - float(log.extract(r' ([0-9.]+?)\% '))
-    event.calling_party_number = log.extract(r'sofia/external/(.+?) ')
+    event.calling_party_number = log.extract(r'sofia/external/(.+?)\)? ')
     event.inbound_client_ip = log.extract(r'receiving invite from (.+?):')
     if log.match(r'New Channel'): event.event_type = 'call'
     if log.match(r'sending invite call-id'): event.call_direction = 'outbound'
