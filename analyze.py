@@ -149,6 +149,7 @@ def init_db(db_file:str='events.db') -> sqlite3.Cursor:
   db_cursor.execute('''
     CREATE TABLE IF NOT EXISTS state_changes (
       event_id TEXT,
+      timestamp REAL,
       state_before TEXT,
       state_after TEXT
     )
@@ -162,9 +163,9 @@ def store_event(event:dict, db_cursor:sqlite3.Cursor) -> None:
   sql = f'INSERT OR REPLACE INTO events ({k}) VALUES ({v})'
   db_cursor.execute(sql)
 
-  for state in event['state_changes']:
-    (state_before, state_after) = state.split(' -> ')
-    sql = f'INSERT INTO state_changes (event_id, state_before, state_after) VALUES ("%s", "%s", "%s")' % (event['event_id'], state_before, state_after)
+  for state_entry in event['state_changes']:
+    state_before, state_after, timestamp = state_entry
+    sql = f'INSERT INTO state_changes (event_id, state_before, state_after, timestamp) VALUES ("{event["event_id"]}", "{state_before}", "{state_after}", {timestamp})'
     db_cursor.execute(sql)
 
 epilog = f"""
@@ -215,7 +216,11 @@ with open(args.logfile, encoding=args.encoding) as f:
     if log.match(r'sending invite call-id'): event.call_direction = 'outbound'
     if log.match(r'receiving invite'): event.call_direction = 'inbound'
     if log.match(r'Callstate Change'): event.callstate_changes.append(log.extract(r'Callstate Change (.+?)$'))
-    if log.match(r'state change') and log.match(r' -> '): event.state_changes.append(log.extract(r'state change (.+?)$'))
+    if log.match(r'state change') and log.match(r' -> '):
+      state_change = log.extract(r'state change (.+?)$')
+      if state_change:
+        state_before, state_after = state_change.split(' -> ')
+        event.state_changes.append((state_before, state_after, log.timestamp))
 
     event.end = log.timestamp
     event.duration = event.end - event.start
