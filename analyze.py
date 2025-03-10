@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import argparse
 from argparse import RawTextHelpFormatter
@@ -25,8 +25,11 @@ class Event:
   calling_party_number: Optional[str] = None
   call_direction: Optional[str] = None
   inbound_client_ip: Optional[str] = None
+  codec: Optional[str] = None
   callstate_changes: List[str] = field(default_factory=list)
   state_changes: List[str] = field(default_factory=list)
+  playbacks: List[str] = field(default_factory=list)
+  dtmfs: List[str] = field(default_factory=list)
 
   def to_dict(self):
     return {
@@ -39,8 +42,11 @@ class Event:
       "calling_party_number": self.calling_party_number,
       "call_direction": self.call_direction,
       "inbound_client_ip": self.inbound_client_ip,
+      "codec": self.codec,
       "callstate_changes": self.callstate_changes,
       "state_changes": self.state_changes,
+      "playbacks": self.playbacks,
+      "dtmfs": self.dtmfs,
     }
 
 @dataclass
@@ -139,7 +145,8 @@ def init_db(db_file:str='events.db') -> sqlite3.Cursor:
       cpu_load REAL,
       calling_party_number TEXT,
       call_direction TEXT,
-      inbound_client_ip TEXT
+      inbound_client_ip TEXT,
+      codec TEXT
     )
   ''')
 
@@ -152,17 +159,48 @@ def init_db(db_file:str='events.db') -> sqlite3.Cursor:
     )
   ''')
 
+  db_cursor.execute('''
+    CREATE TABLE IF NOT EXISTS playbacks (
+      event_id TEXT,
+      timestamp REAL,
+      file TEXT
+    )
+  ''')
+
+  db_cursor.execute('''
+    CREATE TABLE IF NOT EXISTS dtmfs (
+      event_id TEXT,
+      timestamp REAL,
+      key TEXT
+    )
+  ''')
+
+
+
   return db_cursor
 
 def store_event(event:dict, db_cursor:sqlite3.Cursor) -> None:
-  k = ', '.join(list(event.keys())[:-2])
-  v = ', '.join('"'+str(value)+'"' if value is not None else 'NULL' for value in list(event.values())[:-2])
+
+  # Filter keys that belong into different table
+  event_filtered = {k: v for k, v in event.items() if k not in ["callstate_changes", "state_changes", "playbacks", "dtmfs"]}
+  k = ', '.join(list(event_filtered.keys()))
+  v = ', '.join('"'+str(value)+'"' if value is not None else 'NULL' for value in list(event_filtered.values()))
   sql = f'INSERT OR REPLACE INTO events ({k}) VALUES ({v})'
   db_cursor.execute(sql)
 
   for state_entry in event['state_changes']:
     state_before, state_after, timestamp = state_entry
     sql = f'INSERT INTO state_changes (event_id, state_before, state_after, timestamp) VALUES ("{event["event_id"]}", "{state_before}", "{state_after}", {timestamp})'
+    db_cursor.execute(sql)
+
+  for playback in event['playbacks']:
+    file, timestamp = playback
+    sql = f'INSERT INTO playbacks (event_id, file, timestamp) VALUES ("{event["event_id"]}", "{file}", {timestamp})'
+    db_cursor.execute(sql)
+
+  for dtmf in event['dtmfs']:
+    key, timestamp = dtmf
+    sql = f'INSERT INTO dtmfs (event_id, key, timestamp) VALUES ("{event["event_id"]}", "{key}", {timestamp})'
     db_cursor.execute(sql)
 
 epilog = f"""
@@ -212,12 +250,21 @@ with open(args.logfile, encoding=args.encoding) as f:
     if log.match(r'New Channel'): event.event_type = 'call'
     if log.match(r'sending invite call-id'): event.call_direction = 'outbound'
     if log.match(r'receiving invite'): event.call_direction = 'inbound'
+    if log.match(r'Original read codec set to '): event.codec = log.extract(r'Original read codec set to (.*)$')
     if log.match(r'Callstate Change'): event.callstate_changes.append(log.extract(r'Callstate Change (.+?)$'))
     if log.match(r'state change') and log.match(r' -> '):
       state_change = log.extract(r'state change (.+?)$')
       if state_change:
         state_before, state_after = state_change.split(' -> ')
         event.state_changes.append((state_before, state_after, log.timestamp))
+    if log.match(r'Command Execute .* playback\(.*\)'):
+      playback = log.extract(r'Command Execute .* playback\((?:\{.*\})?(.*)\)')
+      if playback:
+        event.playbacks.append((playback,log.timestamp))
+    if log.match(r'RTP RECV DTMF .*:'):
+      key = log.extract(r'RTP RECV DTMF (.*):')
+      if key:
+        event.dtmfs.append((key,log.timestamp))
 
     event.end = log.timestamp
     event.duration = event.end - event.start
